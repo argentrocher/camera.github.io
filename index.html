@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Caméra avec filtres</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      height: 100%;
+      background: black;
+      font-family: sans-serif;
+    }
+
+    #toolbar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      padding: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+    }
+
+    #toolbar button {
+      padding: 10px 20px;
+      border: none;
+      background: #333;
+      color: white;
+      cursor: pointer;
+      border-radius: 5px;
+    }
+
+    #toolbar button:hover {
+      background: #555;
+    }
+
+    #toolbar button:active {
+      background: #777;
+    }    
+
+    #flipCheckbox{
+      width:20px;
+      height:20px;
+   }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    video {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button data-filter="none" tabindex="1">Aucun</button>
+    <button data-filter="grayscale" tabindex="2">Niveaux de gris</button>
+    <button data-filter="invert" tabindex="3">Négatif</button>
+    <button data-filter="red" tabindex="4">Rouge uniquement</button>
+    <button data-filter="redinvert" tabindex="5">Rouge négatif</button>
+    <button data-filter="contraste" tabindex="6">Contraste</button>
+    <button data-filter="move" tabindex="7">Mouvement</button>
+    <button data-filter="pointeur" tabindex="8">Pointeur</button>
+    <button onclick="screen()" tabindex="9">Screen</button>
+    <label style="color: white;" tabindex="-1">
+    <input type="checkbox" id="flipCheckbox" tabindex="10">
+    Inverser la caméra (miroir)
+    </label>
+    <p style="position: absolute; top: 1px; right: 30px; font-size: 7px; margin: 2px; color: white;">by argentrocher !</p>
+  </div>
+
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas" tabindex="-1"></canvas>
+
+  
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    let oldData = null;
+
+    let previousFrame = null;
+    let backgroundFrame = null;
+
+    let flipHorizontal = false;
+
+   let lastGreenBox = null;
+   let lastGreenBoxTime = 0; // timestamp en ms
+   const greenBoxPersistence = 1500; // 1.5 secondes
+
+    document.getElementById('flipCheckbox').addEventListener('change', function () {
+    flipHorizontal = this.checked;
+    });
+
+    let currentFilter = 'none';
+
+    document.querySelectorAll('#toolbar button[data-filter]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentFilter = btn.dataset.filter;
+      });
+    });
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => {
+        video.srcObject = stream;
+
+function drawGreenBox(data, coords, canvasWidth, canvasHeight, boxWidth = 40, boxHeight = 60) {
+  const startX = Math.max(coords.x - boxWidth / 2, 0);
+  const startY = Math.max(coords.y - boxHeight / 2, 0);
+  const endX = Math.min(coords.x + boxWidth / 2, canvasWidth);
+  const endY = Math.min(coords.y + boxHeight / 2, canvasHeight);
+
+  // Dessiner le cadre en vert pixel par pixel (haut et bas)
+  for (let x = startX; x < endX; x++) {
+    let top = (startY * canvasWidth + x) * 4;
+    let bottom = ((endY - 1) * canvasWidth + x) * 4;
+    data[top] = 0; data[top + 1] = 255; data[top + 2] = 0; // Vert
+    data[bottom] = 0; data[bottom + 1] = 255; data[bottom + 2] = 0;
+  }
+
+  // Dessiner les côtés gauche et droit
+  for (let y = startY; y < endY; y++) {
+    let left = (y * canvasWidth + startX) * 4;
+    let right = (y * canvasWidth + (endX - 1)) * 4;
+    data[left] = 0; data[left + 1] = 255; data[left + 2] = 0;
+    data[right] = 0; data[right + 1] = 255; data[right + 2] = 0;
+  }
+}
+
+function detectEyeStructure(data, canvasWidth, canvasHeight) {
+    let coords = null;
+
+    for (let y = 0; y < canvasHeight; y++) {
+        for (let x = 0; x < canvasWidth; x++) {
+            let i = (y * canvasWidth + x) * 4;
+
+            // Si le pixel correspond à une structure sombre (potentielle zone de l'œil)
+            if (data[i] < 50 && data[i + 1] < 50 && data[i + 2] < 50) {
+                // Vérification horizontale pour deux lignes parallèles sombres
+                let match = true;
+                for (let offset = -20; offset <= 20; offset++) {
+                    let horizontalIndex1 = i + offset * 4;
+                    let horizontalIndex2 = i + offset * 4 + canvasWidth * 4; // Deuxième ligne
+
+                    if (
+                        horizontalIndex1 >= 0 && horizontalIndex1 < data.length &&
+                        horizontalIndex2 >= 0 && horizontalIndex2 < data.length
+                    ) {
+                        let r1 = data[horizontalIndex1], g1 = data[horizontalIndex1 + 1], b1 = data[horizontalIndex1 + 2];
+                        let r2 = data[horizontalIndex2], g2 = data[horizontalIndex2 + 1], b2 = data[horizontalIndex2 + 2];
+
+                        if (!(r1 < 50 && g1 < 50 && b1 < 50 && r2 < 50 && g2 < 50 && b2 < 50)) {
+                            match = false;
+                            break;
+                        }
+                    } else {
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match) {
+                    coords = { x: x, y: y };
+                    return coords; // Retourner la première correspondance trouvée
+                }
+            }
+        }
+    }
+
+    return coords;
+}
+
+function draw() {
+  if (flipHorizontal) {
+    ctx.save();
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  if (flipHorizontal) {
+    ctx.restore();
+  }
+  let frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let data = frame.data;
+
+  switch (currentFilter) {
+     case 'face':
+            // Appeler la fonction pour détecter la structure des yeux
+            let eyeCoords = detectEyeStructure(data, canvas.width, canvas.height);
+            if (eyeCoords) {
+                drawGreenBox(data, eyeCoords, canvas.width, canvas.height, 100, 50);
+            }
+            break;
+
+    case 'grayscale':
+      for (let i = 0; i < data.length; i += 4) {
+        let r = data[i], g = data[i + 1], b = data[i + 2];
+        let avg = (r + g + b) / 3;
+        data[i] = data[i + 1] = data[i + 2] = avg;
+      }
+      break;
+
+    case 'invert':
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = 255 - data[i];
+        data[i + 1] = 255 - data[i + 1];
+        data[i + 2] = 255 - data[i + 2];
+      }
+      break;
+
+    case 'red':
+      for (let i = 0; i < data.length; i += 4) {
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+      }
+      break;
+
+   case 'redinvert':
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = 255 - data[i];
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+      }
+      break;
+
+    case 'contraste':
+      for (let y = 1; y < canvas.height - 1; y++) {
+        for (let x = 1; x < canvas.width - 1; x++) {
+          let i = (y * canvas.width + x) * 4;
+
+          let r = data[i], g = data[i + 1], b = data[i + 2];
+          let iRight = (y * canvas.width + (x + 1)) * 4;
+          let r2 = data[iRight], g2 = data[iRight + 1], b2 = data[iRight + 2];
+
+          let diff = Math.abs(r - r2) + Math.abs(g - g2) + Math.abs(b - b2);
+
+          if (diff > 12) {
+            data[i] = 0;
+            data[i + 1] = 255;
+            data[i + 2] = 0;
+          } else {
+            data[i] = data[i + 1] = data[i + 2] = 0;
+          }
+        }
+      }
+      break;
+    case 'move':
+  if (!oldData || !stableData) {
+    oldData = new Uint8ClampedArray(data);
+    stableData = new Uint8ClampedArray(data);
+    break;
+  }
+
+  const noiseThreshold = 30;
+  const backgroundTolerance = 220;
+  const blockSize = 3;
+  const movementThreshold = 5;
+
+  for (let y = 0; y < canvas.height; y += blockSize) {
+    for (let x = 0; x < canvas.width; x += blockSize) {
+      let diffCount = 0;
+
+      for (let dy = 0; dy < blockSize; dy++) {
+        for (let dx = 0; dx < blockSize; dx++) {
+          const px = x + dx;
+          const py = y + dy;
+
+          if (px >= canvas.width || py >= canvas.height) continue;
+
+          const i = (py * canvas.width + px) * 4;
+
+          const r = data[i], g = data[i+1], b = data[i+2];
+          const rOld = oldData[i], gOld = oldData[i+1], bOld = oldData[i+2];
+          const rStable = stableData[i], gStable = stableData[i+1], bStable = stableData[i+2];
+
+          const diffOld = Math.abs(r - rOld) + Math.abs(g - gOld) + Math.abs(b - bOld);
+          const diffStable = Math.abs(r - rStable) + Math.abs(g - gStable) + Math.abs(b - bStable);
+
+          if (diffOld > noiseThreshold && diffStable > backgroundTolerance) {
+            diffCount++;
+          }
+
+          // met à jour la "vision longue" lentement (stabilisation)
+          stableData[i] = (stableData[i] * 0.9 + r * 0.1);
+          stableData[i+1] = (stableData[i+1] * 0.9 + g * 0.1);
+          stableData[i+2] = (stableData[i+2] * 0.9 + b * 0.1);
+        }
+      }
+
+      const color = (diffCount >= movementThreshold) ? 255 : 0;
+
+      for (let dy = 0; dy < blockSize; dy++) {
+        for (let dx = 0; dx < blockSize; dx++) {
+          const px = x + dx;
+          const py = y + dy;
+
+          if (px >= canvas.width || py >= canvas.height) continue;
+
+          const i = (py * canvas.width + px) * 4;
+          data[i] = data[i+1] = data[i+2] = color;
+        }
+      }
+    }
+  }
+
+  oldData = new Uint8ClampedArray(data);
+  break;
+
+    case 'pointeur': 
+  if (!previousFrame || !backgroundFrame) {
+    previousFrame = new Uint8ClampedArray(data);
+    backgroundFrame = new Uint8ClampedArray(data);
+    break;
+  }
+
+  const internalMovementMap = new Uint8ClampedArray(data.length);
+  const noiseCutoff = 30;
+  const backgroundStability = 260;
+  const motionBlock = 3;
+  const movementTrigger = 5;
+
+  for (let y = 0; y < canvas.height; y += motionBlock) {
+    for (let x = 0; x < canvas.width; x += motionBlock) {
+      let motionPixelCount = 0;
+
+      for (let dy = 0; dy < motionBlock; dy++) {
+        for (let dx = 0; dx < motionBlock; dx++) {
+          const px = x + dx, py = y + dy;
+          if (px >= canvas.width || py >= canvas.height) continue;
+
+          const i = (py * canvas.width + px) * 4;
+
+          const rNow = data[i], gNow = data[i + 1], bNow = data[i + 2];
+          const rPrev = previousFrame[i], gPrev = previousFrame[i + 1], bPrev = previousFrame[i + 2];
+          const rBg = backgroundFrame[i], gBg = backgroundFrame[i + 1], bBg = backgroundFrame[i + 2];
+
+          const diffPrev = Math.abs(rNow - rPrev) + Math.abs(gNow - gPrev) + Math.abs(bNow - bPrev);
+          const diffBg = Math.abs(rNow - rBg) + Math.abs(gNow - gBg) + Math.abs(bNow - bBg);
+
+          if (diffPrev > noiseCutoff && diffBg > backgroundStability) {
+            motionPixelCount++;
+          }
+
+          // Stabilisation progressive du fond
+          backgroundFrame[i] = backgroundFrame[i] * 0.9 + rNow * 0.1;
+          backgroundFrame[i + 1] = backgroundFrame[i + 1] * 0.9 + gNow * 0.1;
+          backgroundFrame[i + 2] = backgroundFrame[i + 2] * 0.9 + bNow * 0.1;
+        }
+      }
+
+      const motionDetected = motionPixelCount >= movementTrigger ? 255 : 0;
+
+      for (let dy = 0; dy < motionBlock; dy++) {
+        for (let dx = 0; dx < motionBlock; dx++) {
+          const px = x + dx, py = y + dy;
+          if (px >= canvas.width || py >= canvas.height) continue;
+
+          const i = (py * canvas.width + px) * 4;
+          internalMovementMap[i] = internalMovementMap[i + 1] = internalMovementMap[i + 2] = motionDetected;
+          internalMovementMap[i + 3] = 255;
+        }
+      }
+    }
+  }
+
+  previousFrame = new Uint8ClampedArray(data);
+
+  // ---------- Analyse des zones blanches pour ressemblance peau ----------
+  const detectionThreshold = 0.5;
+  const scanBlock = 20;
+  let minX = canvas.width, minY = canvas.height;
+let maxX = 0, maxY = 0;
+let totalWhite = 0;
+
+for (let y = 0; y < canvas.height; y++) {
+  for (let x = 0; x < canvas.width; x++) {
+    const i = (y * canvas.width + x) * 4;
+    const r = internalMovementMap[i];
+    const g = internalMovementMap[i + 1];
+    const b = internalMovementMap[i + 2];
+
+    if (r > 200 && g > 200 && b > 200) {
+      totalWhite++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+}
+
+if (totalWhite > 100) { // assez de points pour valider
+  const zoneWidth = maxX - minX;
+  const zoneHeight = maxY - minY;
+  const centerX = minX + zoneWidth / 2;
+  const centerY = minY + zoneHeight / 2;
+
+  let rZone = 0, gZone = 0, bZone = 0, count = 0;
+
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const i = (y * canvas.width + x) * 4;
+      rZone += data[i];
+      gZone += data[i + 1];
+      bZone += data[i + 2];
+      count++;
+    }
+  }
+
+  const avgR = rZone / count;
+  const avgG = gZone / count;
+  const avgB = bZone / count;
+  const brightness = (avgR + avgG + avgB) / 3;
+  const diffRG = Math.abs(avgR - avgG);
+  const diffGB = Math.abs(avgG - avgB);
+
+  let looksLikeSkin = (
+    brightness > 80 &&
+    brightness < 255 &&
+    diffRG < 40 &&
+    diffGB < 60 &&
+    avgR > avgG && avgG > avgB
+  );
+ looksLikeSkin = 1;
+
+  if (looksLikeSkin) {
+    drawGreenBox(data, { x: centerX, y: centerY }, canvas.width, canvas.height, zoneWidth, zoneHeight);
+   // ---------- Recherche simple d'une zone beige dans le haut du cadre ----------
+const beigeTolerance = 20;
+
+// Moyenne estimée pour du beige clair (type peau)
+const targetBeige = { r: 200, g: 170, b: 140 };
+
+let beigeMinX = canvas.width, beigeMinY = canvas.height;
+let beigeMaxX = 0, beigeMaxY = 0;
+let beigeCount = 0;
+
+// Zone haute (environ 40% supérieure du cadre détecté)
+const searchTop = minY;
+const searchBottom = minY + zoneHeight * 0.6;
+
+for (let y = searchTop; y < searchBottom; y++) {
+  for (let x = minX; x < maxX; x++) {
+    const i = (y * canvas.width + x) * 4;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+
+    const isBeige =
+      Math.abs(r - targetBeige.r) < beigeTolerance &&
+      Math.abs(g - targetBeige.g) < beigeTolerance &&
+      Math.abs(b - targetBeige.b) < beigeTolerance &&
+      r > g && g > b;
+
+    if (isBeige) {
+      beigeCount++;
+      if (x < beigeMinX) beigeMinX = x;
+      if (x > beigeMaxX) beigeMaxX = x;
+      if (y < beigeMinY) beigeMinY = y;
+      if (y > beigeMaxY) beigeMaxY = y;
+    }
+  }
+}
+
+// Si assez de pixels beiges trouvés, on dessine une boîte
+if (beigeCount > 50) {
+  let boxWidth = beigeMaxX - beigeMinX;
+  if (boxWidth > 305) {
+    const center = beigeMinX + boxWidth / 2;
+    beigeMinX = Math.max(center - 150, 0);
+    beigeMaxX = Math.min(center + 150, canvas.width);
+    boxWidth = beigeMaxX - beigeMinX;
+  }
+  const boxHeight = beigeMaxY - beigeMinY;
+  const centerX = beigeMinX + boxWidth / 2;
+  const centerY = beigeMinY + boxHeight / 2;
+  console.log(boxWidth);
+     
+   // Pas de paire valide, on garde la box beige
+  if (boxWidth > 100){
+   lastGreenBox = {
+  x: centerX,
+  y: centerY,
+  width: boxWidth,
+  height: boxHeight
+};
+   lastGreenBoxTime = Date.now(); // mise à jour du moment de la détection
+   drawGreenBox(data, { x: centerX, y: centerY }, canvas.width, canvas.height, boxWidth, boxHeight);
+  } else {lastGreenBoxTime = 0;}
+ }
+}
+}
+if (lastGreenBox && (Date.now() - lastGreenBoxTime < greenBoxPersistence)) {
+  drawGreenBox(
+    data,
+    { x: lastGreenBox.x, y: lastGreenBox.y },
+    canvas.width,
+    canvas.height,
+    lastGreenBox.width,
+    lastGreenBox.height
+  );
+}
+  break;
+
+    case 'none':
+    default:
+      // pas de traitement
+      break;
+  }
+
+          ctx.putImageData(frame, 0, 0);
+          requestAnimationFrame(draw);
+        }
+
+        requestAnimationFrame(draw);
+      })
+      .catch(err => {
+        console.error("Erreur d'accès à la caméra :", err);
+      });
+
+  function screen() {
+    //const canvas = document.getElementById("canvas");
+    const imageDataURL = canvas.toDataURL("image/jpeg", 0.9); // 0.9 = qualité JPEG
+
+    // Créer un lien de téléchargement
+    const link = document.createElement("a");
+    link.href = imageDataURL;
+    link.download = `capture_${Date.now()}.jpg`;
+    link.click();
+  }
+
+  document.addEventListener('keydown', function (e) {
+    const active = document.activeElement;
+    if (!active || !active.tabIndex || active.tabIndex < 1 || active.tabIndex > 10) return;
+
+    let nextTabIndex;
+    if (e.key === 'ArrowRight') {
+      nextTabIndex = active.tabIndex + 1;
+      if (nextTabIndex > 10) nextTabIndex = 1; // boucle au début
+    } else if (e.key === 'ArrowLeft') {
+      nextTabIndex = active.tabIndex - 1;
+      if (nextTabIndex < 1) nextTabIndex = 10; // boucle à la fin
+    } else {
+      return; // ne continue que si flèche gauche/droite
+    }
+
+    // Trouve l'élément avec le bon tabindex
+    const next = document.querySelector('[tabindex="' + nextTabIndex + '"]');
+    if (next) {
+      e.preventDefault();
+      next.focus();
+    }
+  });
+  </script>
+</body>
+</html>
+
+Créé par argentropcher tout droit réservé, assigné au compte Google argentrocher, contenu libre, modification autorisée sous mention de l'auteur.
